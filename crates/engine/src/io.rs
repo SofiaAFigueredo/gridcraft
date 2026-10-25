@@ -269,8 +269,7 @@ pub fn save_file_bytes(wb: &Workbook, path: &str) -> Result<Vec<u8>> {
 /// A symlink is followed, since that is where Save writes (see [`write_file`]): links are
 /// rebased against the folder the bytes actually land in.
 pub fn source_dir(path: &str) -> Option<std::path::PathBuf> {
-    let file = resolve_path(path).or_else(|| std::path::absolute(path).ok())?;
-    file.parent().map(std::path::Path::to_path_buf)
+    resolve_destination(path)?.parent().map(std::path::Path::to_path_buf)
 }
 
 /// The file `path` really names once symlinks are followed: where a save through it lands.
@@ -284,6 +283,20 @@ pub fn resolve_path(path: &str) -> Option<std::path::PathBuf> {
     {
         let _ = path;
         None
+    }
+}
+
+/// Where a save to `path` lands: the file itself with symlinks followed, or, for a file that
+/// doesn't exist yet, its folder with symlinks followed and the name added. Falls back to the
+/// absolute path when nothing resolves.
+pub fn resolve_destination(path: &str) -> Option<std::path::PathBuf> {
+    if let Some(file) = resolve_path(path) {
+        return Some(file);
+    }
+    let absolute = std::path::absolute(path).ok()?;
+    match (absolute.parent().and_then(|dir| resolve_path(dir.to_str()?)), absolute.file_name()) {
+        (Some(dir), Some(name)) => Some(dir.join(name)),
+        _ => Some(absolute),
     }
 }
 
@@ -653,14 +666,16 @@ pub fn read_file(path: &str) -> Result<Vec<u8>> {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn write_file(path: &str, bytes: &[u8]) -> Result<()> {
-    write_file_expecting(path, bytes, None)
+    write_file_expecting(path, bytes, None).map(|_| ())
 }
 
 /// [`write_file`] for a document's own file: `expected` is what `path` resolved to when the
-/// document was opened or last saved. If a symlink in `path` has been retargeted since, the
-/// save fails instead of overwriting a file the user never opened (Save As picks a new place).
+/// document was opened or last saved. If a symlink in `path` has been retargeted (or left
+/// dangling) since, the save fails instead of overwriting a file the user never opened (Save
+/// As picks a new place). Returns the file that was written, which is what the next save
+/// should expect: resolving `path` again could already name something else.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn write_file_expecting(path: &str, bytes: &[u8], expected: Option<&std::path::Path>) -> Result<()> {
+pub fn write_file_expecting(path: &str, bytes: &[u8], expected: Option<&std::path::Path>) -> Result<std::path::PathBuf> {
     use std::io::Write;
     script_sandbox_check(path)?;
     // Write to a temporary file, then rename: a crash never leaves a half-written workbook.
@@ -671,19 +686,16 @@ pub fn write_file_expecting(path: &str, bytes: &[u8], expected: Option<&std::pat
     //
     // A symlink is followed first: renaming over the link itself would replace it with a
     // regular file and leave the real workbook untouched, so the temporary file is created
-    // beside the link's target and the rename lands on it. A path that doesn't resolve (a new
-    // file) is written as given.
-    let resolved = std::fs::canonicalize(path).ok();
-    if let (Some(now), Some(then)) = (&resolved, expected)
-        && now != then
-    {
-        return Err(EngineError::Other(format!(
-            "{path}: it now points to {} instead of {}; use Save As to choose where to write",
-            now.display(),
-            then.display()
-        )));
+    // beside the link's target and the rename lands on it. A new file is written in its
+    // folder with symlinks followed.
+    let destination = resolve_destination(path).ok_or_else(|| EngineError::Other(format!("{path}: not a valid path")))?;
+    if let Some(then) = expected {
+        let dangling = std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) && resolve_path(path).is_none();
+        if dangling || destination != then {
+            return Err(EngineError::Other(format!("{path}: it no longer points to {}; use Save As to choose where to write", then.display())));
+        }
     }
-    let target = resolved.as_deref().and_then(std::path::Path::to_str).map_or_else(|| path.to_owned(), str::to_owned);
+    let target = destination.to_str().map_or_else(|| path.to_owned(), str::to_owned);
     let tmp = format!("{target}.sctmp");
     let prior = std::fs::metadata(&target).ok().map(|m| m.permissions());
     let mut opts = std::fs::OpenOptions::new();
@@ -710,16 +722,17 @@ pub fn write_file_expecting(path: &str, bytes: &[u8], expected: Option<&std::pat
         // no temporary file beside the user's workbook.
         let _ = std::fs::remove_file(&tmp);
         EngineError::Other(format!("{path}: {e}"))
-    })
+    })?;
+    Ok(destination)
 }
 
 #[cfg(target_arch = "wasm32")]
 pub fn write_file(path: &str, bytes: &[u8]) -> Result<()> {
-    write_file_expecting(path, bytes, None)
+    write_file_expecting(path, bytes, None).map(|_| ())
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn write_file_expecting(path: &str, _bytes: &[u8], _expected: Option<&std::path::Path>) -> Result<()> {
+pub fn write_file_expecting(path: &str, _bytes: &[u8], _expected: Option<&std::path::Path>) -> Result<std::path::PathBuf> {
     script_sandbox_check(path)?;
     Err(EngineError::Other(format!("{path}: no file system in the browser")))
 }
@@ -876,6 +889,28 @@ mod tests {
         let deep_link = dir.join("deep-link.xlsx");
         std::os::unix::fs::symlink(&deep, &deep_link).unwrap();
         assert_eq!(source_dir(deep_link.to_str().unwrap()).unwrap(), std::fs::canonicalize(dir.join("sub")).unwrap());
+        // A new file below a symlinked folder rebases against the folder it lands in.
+        let dir_link = dir.join("folder-link");
+        std::os::unix::fs::symlink(dir.join("sub"), &dir_link).unwrap();
+        let fresh = dir_link.join("new.xlsx");
+        assert_eq!(source_dir(fresh.to_str().unwrap()).unwrap(), std::fs::canonicalize(dir.join("sub")).unwrap());
+        let written = write_file_expecting(fresh.to_str().unwrap(), b"n", None).unwrap();
+        assert_eq!(written, std::fs::canonicalize(dir.join("sub")).unwrap().join("new.xlsx"));
+        assert_eq!(std::fs::read(dir.join("sub").join("new.xlsx")).unwrap(), b"n");
+        // A link left dangling since open is refused, not replaced by a regular file; a
+        // regular file deleted since open is simply written again.
+        std::fs::remove_file(&other).unwrap();
+        let expected = std::fs::canonicalize(&deep).unwrap();
+        std::fs::remove_file(&deep_link).unwrap();
+        std::os::unix::fs::symlink(dir.join("gone.xlsx"), &deep_link).unwrap();
+        assert!(write_file_expecting(deep_link.to_str().unwrap(), b"x", Some(&expected)).is_err());
+        assert!(std::fs::symlink_metadata(&deep_link).unwrap().file_type().is_symlink());
+        let plain = dir.join("sub").join("plain.xlsx");
+        std::fs::write(&plain, b"p").unwrap();
+        let expected = std::fs::canonicalize(&plain).unwrap();
+        std::fs::remove_file(&plain).unwrap();
+        write_file_expecting(plain.to_str().unwrap(), b"again", Some(&expected)).unwrap();
+        assert_eq!(std::fs::read(&plain).unwrap(), b"again");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
