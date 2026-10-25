@@ -8,9 +8,20 @@ use serde_json::json;
 
 type Harness = egui_kittest::Harness<'static, SheetApp>;
 
+fn local_file() -> std::path::PathBuf {
+    let path = std::env::temp_dir().join(format!("gridcraft-ui-link-{}.txt", std::process::id()));
+    std::fs::write(&path, "x").unwrap();
+    path
+}
+
 fn harness() -> Harness {
     let mut session = Session::new();
     session.new_workbook();
+    session.execute("cell.set", json!({"cell": "B6", "input": "file"})).unwrap();
+    session.execute("insert.link", json!({"cell": "B6", "target": local_file().to_str().unwrap()})).unwrap();
+    session.execute("cell.set", json!({"cell": "B8", "input": "=HYPERLINK(\"https://example.org/h\",\"go\")"})).unwrap();
+    session.execute("cell.set", json!({"cell": "B10", "input": "tool"})).unwrap();
+    session.execute("insert.link", json!({"cell": "B10", "target": "/tmp/setup.exe"})).unwrap();
     session.execute("cell.set", json!({"cell": "B2", "input": "web"})).unwrap();
     session.execute("insert.link", json!({"cell": "B2", "target": "https://example.org/a"})).unwrap();
     session.execute("cell.set", json!({"cell": "B4", "input": "jump"})).unwrap();
@@ -94,4 +105,29 @@ fn ctrl_alt_click_on_the_link_text_still_extends_the_selection() {
     assert_eq!(ranges, ["B2", "B4"], "Ctrl+Alt+click adds the hyperlink cell to the selection");
     assert_eq!(d.selection.active.a1(), "B4", "the link was not followed");
     assert!(h.state().dialog.is_none(), "no link dialog");
+}
+
+#[test]
+fn a_click_on_a_local_file_link_asks_before_opening_it() {
+    let mut h = harness();
+    click(&mut h, "B6", Modifiers::NONE);
+    let d = h.state().dialog.as_ref().expect("a link to a file on this computer asks first (#2596)");
+    assert_eq!(d.name, "openLink");
+    assert!(h.state().message.is_none());
+}
+
+#[test]
+fn a_click_on_a_hyperlink_formula_follows_it() {
+    let mut h = harness();
+    click(&mut h, "B8", Modifiers::NONE);
+    let d = h.state().dialog.as_ref().expect("=HYPERLINK() cells follow their link on click (#2596)");
+    assert_eq!(d.name, "openLink");
+}
+
+#[test]
+fn a_click_on_a_link_to_a_program_is_refused_with_a_message() {
+    let mut h = harness();
+    click(&mut h, "B10", Modifiers::NONE);
+    assert!(h.state().dialog.is_none());
+    assert!(h.state().message.as_ref().is_some_and(|(_, why)| why.contains("programs and scripts")), "{:?}", h.state().message);
 }

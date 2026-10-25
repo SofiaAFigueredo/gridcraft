@@ -2475,12 +2475,12 @@ fn interact(app: &mut SheetApp, ui: &mut egui::Ui, resp: &egui::Response, geo: &
             }
         } else if mods.command {
             // Ctrl+click (without Alt) on a hyperlink's text follows it instead of adding the cell to the selection.
-            if let Some(h) = sh.hyperlinks.get(&c).cloned()
+            if let Some((target, external)) = gridcraft_engine::links::link_at(wb, wb.active_sheet, c)
                 && primary_clicked
                 && !mods.alt
                 && p.x < geo.cell_rect(sh, c).left() + geo.cell_rect(sh, c).width() * 0.8
             {
-                follow_link(app, &h.target);
+                follow_link(app, &target, external);
             } else {
                 select_ranges(app, RangeRef::cell(c), true, c);
             }
@@ -2490,13 +2490,13 @@ fn interact(app: &mut SheetApp, ui: &mut egui::Ui, resp: &egui::Response, geo: &
                 let _ = app.run("cell.toggleCheckbox", json!({"cell": c.a1()}));
             }
             // A click on a hyperlink's text follows it (like Excel); elsewhere in the cell selects.
-            if let Some(h) = sh.hyperlinks.get(&c).cloned()
+            if let Some((target, external)) = gridcraft_engine::links::link_at(wb, wb.active_sheet, c)
                 && primary_clicked
                 && !mods.any()
             {
                 let r = geo.cell_rect(sh, c);
                 if p.x < r.left() + r.width() * 0.8 {
-                    follow_link(app, &h.target);
+                    follow_link(app, &target, external);
                 }
             }
         }
@@ -2987,17 +2987,26 @@ fn delete_selected_object(app: &mut SheetApp, sh: &Sheet) -> bool {
     true
 }
 
-/// A click on a hyperlink. References select; web and e-mail addresses ask first (the dialog's
-/// OK runs `link.open`); every other kind is refused with a message. The decision is the
-/// engine's ([`gridcraft_engine::links::classify`]), the same one `link.open` applies.
-pub fn follow_link(app: &mut SheetApp, target: &str) {
-    use gridcraft_engine::links::{LinkKind, classify};
-    match classify(target) {
+/// A click on a hyperlink (`external`: the workbook marks it as leaving the workbook). References
+/// select; web and e-mail addresses and existing files and folders ask first (the dialog's OK
+/// runs `link.open`); every other kind is refused with a message. The decision is the engine's
+/// ([`gridcraft_engine::links::classify_link`]), the same one `link.open` applies.
+pub fn follow_link(app: &mut SheetApp, target: &str, external: bool) {
+    use gridcraft_engine::links::{LinkKind, classify_link, resolve_local};
+    match classify_link(target, external) {
         LinkKind::Internal(r) => {
             let _ = app.session.run("edit.goTo", json!({"reference": r.trim_start_matches('#')}));
             app.grid.ensure_visible = true;
         }
         LinkKind::External(url) => app.open_dialog("openLink", json!({"url": url})),
+        LinkKind::Local(path) => {
+            let file = app.session.active().and_then(|d| d.path.clone());
+            let base = file.as_deref().and_then(|f| std::path::Path::new(f).parent());
+            match resolve_local(base, &path) {
+                Ok(full) => app.open_dialog("openLink", json!({"url": full.to_string_lossy(), "local": true})),
+                Err(why) => app.message = Some(("Hyperlink".into(), why)),
+            }
+        }
         LinkKind::Refused(why) => app.message = Some(("Hyperlink".into(), why)),
     }
 }
@@ -3843,10 +3852,15 @@ pub(crate) fn paint_overlays(
         );
     }
     // Hyperlink tooltip.
-    if let Some(h) = hover.and_then(|c| sh.hyperlinks.get(&c))
+    if let Some(c) = hover
         && app.editor.is_none()
+        && let Some((target, _)) = gridcraft_engine::links::link_at(wb, si, c)
     {
-        let tip = h.tooltip.clone().unwrap_or_else(|| format!("{}\nClick once to follow. Click and hold to select this cell.", h.target));
+        let tip = sh
+            .hyperlinks
+            .get(&c)
+            .and_then(|h| h.tooltip.clone())
+            .unwrap_or_else(|| format!("{target}\nClick once to follow. Click and hold to select this cell."));
         egui::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), egui::Id::unique("link_tip"), egui::PopupAnchor::Pointer).show(|ui| {
             ui.label(tip);
         });
