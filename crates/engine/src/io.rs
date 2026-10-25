@@ -642,8 +642,14 @@ pub fn write_file(path: &str, bytes: &[u8]) -> Result<()> {
     // path (planted by another local user) makes the save fail instead of truncating the
     // link's target; and it inherits the destination's access restrictions, so saving a
     // private workbook doesn't widen who can read it.
-    let tmp = format!("{path}.sctmp");
-    let prior = std::fs::metadata(path).ok().map(|m| m.permissions());
+    //
+    // A symlink is followed first: renaming over the link itself would replace it with a
+    // regular file and leave the real workbook untouched, so the temporary file is created
+    // beside the link's target and the rename lands on it. A path that doesn't resolve (a new
+    // file) is written as given.
+    let target = std::fs::canonicalize(path).ok().and_then(|p| p.to_str().map(str::to_owned)).unwrap_or_else(|| path.to_owned());
+    let tmp = format!("{target}.sctmp");
+    let prior = std::fs::metadata(&target).ok().map(|m| m.permissions());
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create_new(true);
     #[cfg(unix)]
@@ -663,7 +669,7 @@ pub fn write_file(path: &str, bytes: &[u8]) -> Result<()> {
         let _ = std::fs::remove_file(&tmp);
         EngineError::Other(format!("{path}: {e}"))
     })?;
-    std::fs::rename(&tmp, path).map_err(|e| {
+    std::fs::rename(&tmp, &target).map_err(|e| {
         // A write or rename that fails (full disk, the workbook locked by another app) leaves
         // no temporary file beside the user's workbook.
         let _ = std::fs::remove_file(&tmp);
@@ -780,6 +786,25 @@ mod tests {
         let err = write_file(dest.to_str().unwrap(), b"new").unwrap_err();
         assert_eq!(std::fs::read(&victim).unwrap(), b"original");
         assert!(!dir.join("book.xlsx").exists(), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(unix)]
+    #[test]
+    fn save_through_a_symlink_updates_the_target_and_keeps_the_link() {
+        let dir = std::env::temp_dir().join(format!("gridcraft-fs-safety-symlink-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("real")).unwrap();
+        let real = dir.join("real").join("book.xlsx");
+        std::fs::write(&real, b"v1").unwrap();
+        let link = dir.join("book.xlsx");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        write_file(link.to_str().unwrap(), b"v2").unwrap();
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "the link must stay a link");
+        assert_eq!(std::fs::read(&real).unwrap(), b"v2");
+        assert_eq!(std::fs::read(&link).unwrap(), b"v2");
+        assert!(!dir.join("real").join("book.xlsx.sctmp").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
