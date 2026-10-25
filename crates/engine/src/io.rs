@@ -274,10 +274,10 @@ pub fn source_dir(path: &str) -> Option<std::path::PathBuf> {
 
 /// The file `path` really names once symlinks are followed: where a save through it lands.
 /// `None` when it doesn't exist (yet) or there is no file system.
-pub fn resolve_path(path: &str) -> Option<std::path::PathBuf> {
+pub fn resolve_path(path: impl AsRef<std::path::Path>) -> Option<std::path::PathBuf> {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        std::fs::canonicalize(path).ok()
+        std::fs::canonicalize(path.as_ref()).ok()
     }
     #[cfg(target_arch = "wasm32")]
     {
@@ -294,7 +294,7 @@ pub fn resolve_destination(path: &str) -> Option<std::path::PathBuf> {
         return Some(file);
     }
     let absolute = std::path::absolute(path).ok()?;
-    match (absolute.parent().and_then(|dir| resolve_path(dir.to_str()?)), absolute.file_name()) {
+    match (absolute.parent().and_then(resolve_path), absolute.file_name()) {
         (Some(dir), Some(name)) => Some(dir.join(name)),
         _ => Some(absolute),
     }
@@ -695,9 +695,12 @@ pub fn write_file_expecting(path: &str, bytes: &[u8], expected: Option<&std::pat
             return Err(EngineError::Other(format!("{path}: it no longer points to {}; use Save As to choose where to write", then.display())));
         }
     }
-    let target = destination.to_str().map_or_else(|| path.to_owned(), str::to_owned);
-    let tmp = format!("{target}.sctmp");
-    let prior = std::fs::metadata(&target).ok().map(|m| m.permissions());
+    // Paths stay `PathBuf`s from here: a link may point at a file whose name isn't UTF-8.
+    let target = destination.as_path();
+    let mut tmp_name = target.as_os_str().to_owned();
+    tmp_name.push(".sctmp");
+    let tmp = std::path::PathBuf::from(tmp_name);
+    let prior = std::fs::metadata(target).ok().map(|m| m.permissions());
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create_new(true);
     #[cfg(unix)]
@@ -717,7 +720,7 @@ pub fn write_file_expecting(path: &str, bytes: &[u8], expected: Option<&std::pat
         let _ = std::fs::remove_file(&tmp);
         EngineError::Other(format!("{path}: {e}"))
     })?;
-    std::fs::rename(&tmp, &target).map_err(|e| {
+    std::fs::rename(&tmp, target).map_err(|e| {
         // A write or rename that fails (full disk, the workbook locked by another app) leaves
         // no temporary file beside the user's workbook.
         let _ = std::fs::remove_file(&tmp);
@@ -905,6 +908,17 @@ mod tests {
         std::os::unix::fs::symlink(dir.join("gone.xlsx"), &deep_link).unwrap();
         assert!(write_file_expecting(deep_link.to_str().unwrap(), b"x", Some(&expected)).is_err());
         assert!(std::fs::symlink_metadata(&deep_link).unwrap().file_type().is_symlink());
+        // A target whose name isn't UTF-8 is still written through the link.
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let odd = dir.join("sub").join(std::ffi::OsStr::from_bytes(b"odd-\xff.xlsx"));
+            std::fs::write(&odd, b"o1").unwrap();
+            let odd_link = dir.join("odd-link.xlsx");
+            std::os::unix::fs::symlink(&odd, &odd_link).unwrap();
+            write_file(odd_link.to_str().unwrap(), b"o2").unwrap();
+            assert!(std::fs::symlink_metadata(&odd_link).unwrap().file_type().is_symlink());
+            assert_eq!(std::fs::read(&odd).unwrap(), b"o2");
+        }
         let plain = dir.join("sub").join("plain.xlsx");
         std::fs::write(&plain, b"p").unwrap();
         let expected = std::fs::canonicalize(&plain).unwrap();
