@@ -4458,7 +4458,7 @@ fn link_open_opens_existing_local_files_and_folders_but_not_programs() {
     s.execute("insert.link", json!({"cell": "A1", "target": file.to_str().unwrap()})).unwrap();
     s.execute(
         "cell.set",
-        json!({"cell": "A2", "input": format!("=HYPERLINK(\"{}\",\"folder\")", dir.join("reports").to_str().unwrap().replace('\\', "\\\\"))}),
+        json!({"cell": "A2", "input": format!("=HYPERLINK(\"{}\",\"folder\")", dir.join("reports").to_str().unwrap().replace('"', "\"\""))}),
     )
     .unwrap();
     s.execute("cell.set", json!({"cell": "A3", "input": format!("=HYPERLINK(\"{}\")", "setup.exe")})).unwrap();

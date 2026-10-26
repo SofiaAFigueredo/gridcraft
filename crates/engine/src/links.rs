@@ -84,7 +84,14 @@ fn path_like(t: &str) -> Option<&str> {
     let drive = b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'/' | b'\\');
     let rooted =
         t.starts_with('/') || t.starts_with("~/") || t.starts_with("./") || t.starts_with("../") || t.starts_with(".\\") || t.starts_with("..\\");
-    let separated = t.contains(['/', '\\']) && !t.contains('!') && !t.contains("://");
+    // `file:/x`, `smb:/h/s` and `javascript:a/b` carry a scheme: `classify` must see them. A single
+    // letter is a drive, not a scheme.
+    let has_scheme = t.split_once(':').is_some_and(|(s, _)| {
+        s.len() > 1
+            && s.starts_with(|c: char| c.is_ascii_alphabetic())
+            && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+    });
+    let separated = t.contains(['/', '\\']) && !t.contains('!') && !has_scheme;
     (drive || rooted || separated).then(|| t.split('#').next().unwrap_or(t))
 }
 
@@ -145,10 +152,70 @@ fn local(path: &str) -> LinkKind {
 
 /// Extensions that run code when the system opens them. Compared without case and without the
 /// trailing dots and spaces Windows ignores in a name.
-const PROGRAMS: [&str; 46] = [
-    "exe", "com", "bat", "cmd", "msi", "msp", "scr", "pif", "ps1", "psm1", "vbs", "vbe", "js", "jse", "wsf", "wsh", "hta", "lnk", "url", "jar",
-    "app", "command", "sh", "bash", "zsh", "csh", "ksh", "desktop", "run", "bin", "appimage", "dll", "cpl", "reg", "inf", "scf", "chm", "action",
-    "workflow", "terminal", "py", "pyw", "pl", "rb", "pkg", "dmg",
+const PROGRAMS: &[&str] = &[
+    "exe",
+    "com",
+    "bat",
+    "cmd",
+    "msi",
+    "msp",
+    "scr",
+    "pif",
+    "ps1",
+    "psm1",
+    "vbs",
+    "vbe",
+    "vb",
+    "js",
+    "jse",
+    "wsf",
+    "wsh",
+    "hta",
+    "lnk",
+    "url",
+    "jar",
+    "jnlp",
+    "app",
+    "command",
+    "sh",
+    "bash",
+    "zsh",
+    "csh",
+    "ksh",
+    "desktop",
+    "run",
+    "bin",
+    "appimage",
+    "dll",
+    "ocx",
+    "drv",
+    "sys",
+    "vxd",
+    "wcx",
+    "cpl",
+    "msc",
+    "reg",
+    "inf",
+    "scf",
+    "chm",
+    "rdp",
+    "website",
+    "gadget",
+    "application",
+    "appref-ms",
+    "appcontent-ms",
+    "settingcontent-ms",
+    "appx",
+    "appxbundle",
+    "action",
+    "workflow",
+    "terminal",
+    "py",
+    "pyw",
+    "pl",
+    "rb",
+    "pkg",
+    "dmg",
 ];
 
 fn is_program(path: &Path) -> bool {
@@ -250,6 +317,7 @@ mod tests {
             ("FILE://localhost/tmp/x.txt", "/tmp/x.txt"),
             ("file:///C:/Users/u/doc.txt", "C:/Users/u/doc.txt"),
             ("file:///tmp/folder/", "/tmp/folder/"),
+            ("file:/tmp/a.txt", "/tmp/a.txt"),
             ("/tmp/a.txt", "/tmp/a.txt"),
             ("C:\\Docs\\a.pdf", "C:\\Docs\\a.pdf"),
             ("docs/a.pdf", "docs/a.pdf"),
@@ -291,6 +359,11 @@ mod tests {
             "file:///tmp/%zz",
             "file:///tmp/%ff.txt",
             "file:",
+            "smb:/h/s",
+            "javascript:a/b",
+            "docs/setup.jnlp",
+            "docs/Snap.MSC",
+            "docs/tool.settingcontent-ms",
         ] {
             assert!(matches!(classify(bad), LinkKind::Refused(_)), "{bad:?} -> {:?}", classify(bad));
         }
