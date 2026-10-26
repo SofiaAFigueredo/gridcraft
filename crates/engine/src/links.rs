@@ -254,6 +254,10 @@ pub fn resolve_local(base: Option<&Path>, target: &str) -> Result<PathBuf, Strin
         let base = base.ok_or_else(|| "Save the workbook first: this link is relative to the workbook's folder.".to_string())?;
         base.join(path)
     };
+    // A workbook kept on a share has relative links on that share.
+    if is_unc_prefix(&path.to_string_lossy()) {
+        return Err("Links to network locations aren't opened.".into());
+    }
     if is_program(&path) {
         return Err("Links to programs and scripts aren't opened.".into());
     }
@@ -429,6 +433,8 @@ mod tests {
         assert_eq!(resolve_local(Some(&dir), "doc.txt").unwrap(), dir.join("doc.txt"));
         assert_eq!(resolve_local(Some(&dir), "sub").unwrap(), dir.join("sub"));
         assert_eq!(resolve_local(None, dir.join("doc.txt").to_str().unwrap()).unwrap(), dir.join("doc.txt"));
+        assert!(resolve_local(Some(Path::new("//server/share")), "doc.txt").unwrap_err().contains("network"));
+        assert!(resolve_local(Some(Path::new("\\\\server\\share")), "doc.txt").unwrap_err().contains("network"));
         assert!(resolve_local(None, "/\\server/share").unwrap_err().contains("network"));
         assert!(resolve_local(Some(&dir), "\\\\server\\share").unwrap_err().contains("network"));
         assert!(resolve_local(None, "doc.txt").unwrap_err().contains("Save the workbook"));
