@@ -33,7 +33,7 @@ pub fn classify(target: &str) -> LinkKind {
     if t.chars().any(char::is_control) {
         return LinkKind::Refused("The link contains control characters.".into());
     }
-    if t.starts_with("\\\\") || t.starts_with("//") {
+    if is_unc_prefix(t) {
         return LinkKind::Refused("Links to network locations aren't opened.".into());
     }
     if RangeRef::parse(t).is_some() {
@@ -113,7 +113,7 @@ fn file_url_path(rest: &str) -> Result<String, String> {
     // `file:///C:/x` carries the drive after a slash.
     let b = decoded.as_bytes();
     let decoded = if b.len() >= 3 && b[0] == b'/' && b[1].is_ascii_alphabetic() && b[2] == b':' { decoded[1..].to_string() } else { decoded };
-    if decoded.is_empty() || decoded.chars().any(char::is_control) || decoded.starts_with("//") || decoded.starts_with("\\\\") {
+    if decoded.is_empty() || decoded.chars().any(char::is_control) || is_unc_prefix(&decoded) {
         return Err("The link isn't a valid file address.".into());
     }
     Ok(decoded)
@@ -136,12 +136,18 @@ fn percent_decode(s: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
+/// A network location on Windows: two leading separators of either kind (`//h/s`, `\\h\s`, `/\h/s`).
+fn is_unc_prefix(path: &str) -> bool {
+    let b = path.as_bytes();
+    b.len() >= 2 && matches!(b[0], b'/' | b'\\') && matches!(b[1], b'/' | b'\\')
+}
+
 fn local(path: &str) -> LinkKind {
     let path = path.trim();
     if path.is_empty() {
         return LinkKind::Refused("The link has no file or folder.".into());
     }
-    if path.starts_with("\\\\") || path.starts_with("//") {
+    if is_unc_prefix(path) {
         return LinkKind::Refused("Links to network locations aren't opened.".into());
     }
     if is_program(Path::new(path)) {
@@ -231,6 +237,10 @@ fn is_program(path: &Path) -> bool {
 /// Refuses what doesn't exist, programs and scripts (by name, by what a link resolves to, and on
 /// Unix by the executable bit), so a confirmed click can only open documents and folders.
 pub fn resolve_local(base: Option<&Path>, target: &str) -> Result<PathBuf, String> {
+    // Before anything touches the file system: resolving a share would contact it.
+    if is_unc_prefix(target) {
+        return Err("Links to network locations aren't opened.".into());
+    }
     let path = match target.strip_prefix("~/") {
         Some(rest) => {
             let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from);
@@ -248,6 +258,11 @@ pub fn resolve_local(base: Option<&Path>, target: &str) -> Result<PathBuf, Strin
         return Err("Links to programs and scripts aren't opened.".into());
     }
     let real = std::fs::canonicalize(&path).map_err(|_| format!("\"{}\" doesn't exist or can't be reached.", path.display()))?;
+    // A link on this computer can lead to a share (`\\?\UNC\…` once resolved on Windows).
+    let resolved = real.to_string_lossy();
+    if resolved.starts_with("\\\\?\\UNC\\") || (is_unc_prefix(&resolved) && !resolved.starts_with("\\\\?\\")) {
+        return Err("Links to network locations aren't opened.".into());
+    }
     if is_program(&real) {
         return Err("Links to programs and scripts aren't opened.".into());
     }
@@ -359,6 +374,10 @@ mod tests {
             "file:///tmp/%zz",
             "file:///tmp/%ff.txt",
             "file:",
+            "file:/%5Cserver/share/doc.txt",
+            "file:/%2Fserver/share/doc.txt",
+            "/\\server/share/doc.txt",
+            "\\/server/share/doc.txt",
             "smb:/h/s",
             "javascript:a/b",
             "docs/setup.jnlp",
@@ -382,6 +401,8 @@ mod tests {
         assert_eq!(resolve_local(Some(&dir), "doc.txt").unwrap(), dir.join("doc.txt"));
         assert_eq!(resolve_local(Some(&dir), "sub").unwrap(), dir.join("sub"));
         assert_eq!(resolve_local(None, dir.join("doc.txt").to_str().unwrap()).unwrap(), dir.join("doc.txt"));
+        assert!(resolve_local(None, "/\\server/share").unwrap_err().contains("network"));
+        assert!(resolve_local(Some(&dir), "\\\\server\\share").unwrap_err().contains("network"));
         assert!(resolve_local(None, "doc.txt").unwrap_err().contains("Save the workbook"));
         assert!(resolve_local(Some(&dir), "missing.txt").unwrap_err().contains("doesn't exist"));
         #[cfg(unix)]
