@@ -115,7 +115,7 @@ pub fn sheet_tabs(app: &mut SheetApp, ui: &mut Ui) {
             let all = crate::widgets::icon_button(ui, Icon::SheetList, t.text_dim, app.ui.language.tr("All sheets"), vec2(24.0, 24.0));
             all.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, app.ui.language.tr("All sheets")));
             let items = app.session.active().map(|d| navigator_items(&d.wb.sheets)).unwrap_or_default();
-            let active = app.session.active().map(|d| d.wb.active_sheet.to_string()).unwrap_or_default();
+            let active = app.session.active().map(|d| d.wb.active_sheet().to_string()).unwrap_or_default();
             let rows: Vec<(&str, String)> = items.iter().map(|(i, name)| (i.as_str(), name.clone())).collect();
             if let crate::ribbon::ComboResult::Picked(i) = crate::ribbon::editable_combo(ui, &all, "sheet_navigator", &active, &rows, false)
                 && let Ok(i) = i.parse::<usize>()
@@ -135,7 +135,7 @@ pub fn sheet_tabs(app: &mut SheetApp, ui: &mut Ui) {
                     .iter()
                     .enumerate()
                     .filter(|(_, s)| s.visibility == Visibility::Visible)
-                    .map(|(i, s)| (i, s.name.clone(), s.tab_color.and_then(|c| c.resolve(&d.wb.theme)), i == d.wb.active_sheet))
+                    .map(|(i, s)| (i, s.name.clone(), s.tab_color.and_then(|c| c.resolve(&d.wb.theme)), i == d.wb.active_sheet()))
                     .collect();
             // Keep worksheet tabs in their own horizontally scrollable viewport. As in Excel, the
             // tabs get up to 60% of the bar and the grid's horizontal scrollbar the rest; a strip
@@ -148,7 +148,7 @@ pub fn sheet_tabs(app: &mut SheetApp, ui: &mut Ui) {
             };
             // Reveal the selected sheet after navigation or layout changes, but
             // allow browsing other tabs without snapping back on every frame.
-            let reveal_key = egui::Id::unique((d.uid, d.wb.active_sheet, &sheets, tabs_width.to_bits()));
+            let reveal_key = egui::Id::unique((d.uid, d.wb.active_sheet(), &sheets, tabs_width.to_bits()));
             let reveal_id = ui.scope_id().with("worksheet_tabs_reveal");
             let reveal_active = ui.ctx().data_mut(|data| {
                 let changed = data.get_temp::<egui::Id>(reveal_id) != Some(reveal_key);
@@ -326,49 +326,58 @@ const DOC_TAB_MIN_W: f32 = 110.0;
 const DOC_TAB_MAX_W: f32 = 240.0;
 const DOC_TAB_CLOSE: f32 = 18.0;
 
-/// The workbooks to show as tabs, as `(index in the session, title, unsaved changes)`. Windows
-/// hidden with View › Hide stay off the strip; View › Unhide brings them back.
-fn document_tab_items(session: &gridcraft_engine::Session) -> Vec<(usize, String, bool)> {
-    let hidden = &session.hidden_windows;
-    session.documents().iter().enumerate().filter(|(i, _)| !hidden.contains(i)).map(|(i, d)| (i, d.display_title(), d.is_dirty())).collect()
+/// The windows to show as tabs, as `(window id, title, unsaved changes)`: one tab per window, so a
+/// workbook with several windows (View › New Window) has several, titled `Name:1`, `Name:2`.
+/// Windows hidden with View › Hide stay off the strip; View › Unhide brings them back.
+fn document_tab_items(session: &gridcraft_engine::Session) -> Vec<(u64, String, bool)> {
+    let dirty = |uid: u64| session.documents().iter().any(|d| d.uid == uid && d.is_dirty());
+    session.windows().iter().filter(|w| !w.hidden).filter_map(|w| Some((w.id, session.window_title(w.id)?, dirty(w.doc_uid)))).collect()
 }
 
-/// Switches to workbook `i` from its tab. The cell being edited belongs to the workbook it was
-/// typed in, so it is committed first; an entry that doesn't commit keeps the user where they are.
-fn activate_document(app: &mut SheetApp, i: usize) {
-    if app.session.active_index() == i {
+/// Switches to window `id` from its tab. The cell being edited belongs to the window it was typed
+/// in, so it is committed first; an entry that doesn't commit keeps the user where they are.
+fn activate_document(app: &mut SheetApp, id: u64) {
+    if app.session.active_window() == Some(id) {
         return;
     }
     if app.editor.is_some() && !app.commit_edit(0, 0, false, false) {
         return;
     }
-    app.run_or_alert("window.activate", json!({"index": i}));
+    app.run_or_alert("window.activate", json!({"window": id}));
 }
 
-/// Closes workbook `i` the way File › Close does: its tab becomes the active one and the
-/// command asks about unsaved changes (the Save Changes dialog) before the workbook goes.
-fn close_document(app: &mut SheetApp, i: usize) {
-    if app.session.active_index() != i {
-        activate_document(app, i);
-        if app.session.active_index() != i {
-            return;
-        }
+/// Closes window `id` the way its close button does (`window.close`): a workbook's last window
+/// asks about unsaved changes (the Save Changes dialog) before the workbook goes.
+fn close_document(app: &mut SheetApp, id: u64) {
+    if app.editor.is_some() && !app.commit_edit(0, 0, false, false) {
+        return;
     }
-    if app.commit_edit(0, 0, false, false) {
-        app.run_or_alert("file.close", json!({}));
-    }
+    app.run_or_alert("window.close", json!({"window": id}));
 }
 
-/// Draws the workbook tab strip under the title bar when several workbooks are open: click a
-/// tab to switch, its × (or a middle click) to close it, + for a new workbook. A workbook with
-/// unsaved changes shows a dot in place of the ×.
+/// Draws the window tab strip under the title bar when several windows are open: click a tab to
+/// switch, its × (or a middle click) to close it, + for a new workbook. A workbook with unsaved
+/// changes shows a dot in place of the ×. With native windows (the desktop) every window has its
+/// own OS window and there is no strip.
 pub fn document_tabs(app: &mut SheetApp, ui: &mut Ui) {
+    if app.native_windows {
+        return;
+    }
     let items = document_tab_items(&app.session);
     if items.len() < MIN_DOCUMENT_TABS {
         return;
     }
     let t = Tokens::get(ui.ctx());
-    let active = app.session.active_index();
+    let active = app.session.active_window();
+    // The active tab is brought into view when the active window or the set of tabs changes, not on
+    // every frame, so the strip can still be scrolled to the tabs beyond it.
+    let reveal_key = egui::Id::unique((active, items.iter().map(|(id, ..)| *id).collect::<Vec<_>>()));
+    let reveal_id = ui.scope_id().with("document_tabs_reveal");
+    let reveal_active = ui.ctx().data_mut(|d| {
+        let changed = d.get_temp::<egui::Id>(reveal_id) != Some(reveal_key);
+        d.insert_temp(reveal_id, reveal_key);
+        changed
+    });
     let (mut activate, mut close, mut new) = (None, None, false);
     egui::Panel::top("document_tabs").exact_size(DOC_TAB_H + 2.0).frame(egui::Frame::NONE.fill(t.tab_bar)).show(ui, |ui| {
         let rect = ui.max_rect();
@@ -388,12 +397,12 @@ pub fn document_tabs(app: &mut SheetApp, ui: &mut Ui) {
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 2.0;
                             for (i, title, dirty) in &items {
-                                let (i, dirty, is_active) = (*i, *dirty, *i == active);
+                                let (i, dirty, is_active) = (*i, *dirty, Some(*i) == active);
                                 let font = if is_active { theme::ui_bold(13.0) } else { theme::ui_font(13.0) };
                                 let text_w = ui.painter().layout_no_wrap(title.clone(), font.clone(), t.text).size().x;
                                 let w = (text_w + 20.0 + DOC_TAB_CLOSE + 8.0).clamp(DOC_TAB_MIN_W, DOC_TAB_MAX_W);
                                 let (r, resp) = ui.allocate_exact_size(vec2(w, DOC_TAB_H), Sense::click());
-                                if is_active {
+                                if is_active && reveal_active {
                                     resp.scroll_to_me(None);
                                 }
                                 let tab = Rect::from_min_max(pos2(r.left(), r.top() + 3.0), r.max);
@@ -500,7 +509,7 @@ pub fn status_bar(app: &mut SheetApp, ui: &mut Ui) {
                     if !d.calc.circular.is_empty() {
                         ui.add_space(12.0);
                         // Only a loop on the active sheet is named, so the address needs no sheet.
-                        let label = match d.calc.circular.iter().find(|(si, _)| *si == d.wb.active_sheet) {
+                        let label = match d.calc.circular.iter().find(|(si, _)| *si == d.wb.active_sheet()) {
                             Some((_, c)) => format!("Circular References: {}", c.a1()),
                             None => "Circular References".to_owned(),
                         };
@@ -734,11 +743,11 @@ mod tests {
         let mut app = crate::SheetApp::new(session, Default::default());
         app.begin_edit(Some("99".into()), false);
         activate_sheet(&mut app, 1);
-        assert_eq!(app.session.active().unwrap().wb.active_sheet, 0, "a value the validation stops must not leave its sheet");
+        assert_eq!(app.session.active().unwrap().wb.active_sheet(), 0, "a value the validation stops must not leave its sheet");
         assert!(app.editor.is_some(), "the edit stays open to be corrected");
         app.editor.as_mut().unwrap().text = "7".into();
         activate_sheet(&mut app, 1);
-        assert_eq!(app.session.active().unwrap().wb.active_sheet, 1, "the corrected value commits and the sheet changes");
+        assert_eq!(app.session.active().unwrap().wb.active_sheet(), 1, "the corrected value commits and the sheet changes");
         let a1 = gridcraft_engine::core::CellRef::parse("A1").unwrap();
         assert!(app.session.active().unwrap().wb.sheet(0).unwrap().cell(a1).is_some(), "the value lands on the first sheet");
     }
