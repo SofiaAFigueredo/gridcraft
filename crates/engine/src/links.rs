@@ -257,6 +257,11 @@ pub fn resolve_local(base: Option<&Path>, target: &str) -> Result<PathBuf, Strin
     if is_program(&path) {
         return Err("Links to programs and scripts aren't opened.".into());
     }
+    // Resolving follows links, and a link on this computer can lead to a share: look at where
+    // each one points before the file system is asked to follow it.
+    if leads_to_network(&path, 8) {
+        return Err("Links to network locations aren't opened.".into());
+    }
     let real = std::fs::canonicalize(&path).map_err(|_| format!("\"{}\" doesn't exist or can't be reached.", path.display()))?;
     // A link on this computer can lead to a share (`\\?\UNC\…` once resolved on Windows).
     let resolved = real.to_string_lossy();
@@ -275,6 +280,29 @@ pub fn resolve_local(base: Option<&Path>, target: &str) -> Result<PathBuf, Strin
         }
     }
     Ok(path)
+}
+
+/// Whether `path`, or a folder on the way to it, is a symbolic link (or junction) to a network
+/// location, looking at `read_link` only so nothing is contacted. Follows chains of links `depth`
+/// deep; one that deep is refused as well.
+fn leads_to_network(path: &Path, depth: u8) -> bool {
+    let mut seen = path.ancestors().collect::<Vec<_>>();
+    seen.reverse();
+    seen.into_iter().any(|at| {
+        if !std::fs::symlink_metadata(at).is_ok_and(|m| m.file_type().is_symlink()) {
+            return false;
+        }
+        let Ok(to) = std::fs::read_link(at) else { return false };
+        let text = to.to_string_lossy();
+        if is_unc_prefix(&text) || text.starts_with("\\\\?\\UNC\\") {
+            return true;
+        }
+        let to = if to.is_absolute() { to } else { at.parent().map(|p| p.join(&to)).unwrap_or(to) };
+        match depth.checked_sub(1) {
+            Some(left) => leads_to_network(&to, left),
+            None => true,
+        }
+    })
 }
 
 /// The target of the link in a cell: its stored hyperlink, or the first argument of a cell whose
@@ -413,6 +441,13 @@ mod tests {
             assert!(resolve_local(Some(&dir), "prog").is_err());
             std::os::unix::fs::symlink(dir.join("prog"), dir.join("looks-fine.txt")).unwrap();
             assert!(resolve_local(Some(&dir), "looks-fine.txt").is_err());
+            // A link to a network location is refused without following it, also behind another link.
+            std::os::unix::fs::symlink("//server/share/x", dir.join("share.txt")).unwrap();
+            std::os::unix::fs::symlink(dir.join("share.txt"), dir.join("via.txt")).unwrap();
+            std::os::unix::fs::symlink("//server/share", dir.join("shared-dir")).unwrap();
+            for name in ["share.txt", "via.txt", "shared-dir", "shared-dir/doc.txt"] {
+                assert!(resolve_local(Some(&dir), name).unwrap_err().contains("network"), "{name}");
+            }
             std::fs::write(dir.join("hidden.sh"), "x").unwrap();
             std::os::unix::fs::symlink(dir.join("hidden.sh"), dir.join("notes.txt")).unwrap();
             assert!(resolve_local(Some(&dir), "notes.txt").is_err());
