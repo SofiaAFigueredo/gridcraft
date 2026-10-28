@@ -154,3 +154,17 @@ fn hostile_sheets_attributes_do_not_crash_paste() {
         s.execute("edit.paste", json!({"at": "A1", "text": "5", "html": html})).unwrap();
     }
 }
+
+#[test]
+fn a_formula_with_a_sheets_only_function_keeps_the_value() {
+    // QUERY, IMPORTRANGE and ARRAYFORMULA don't exist here: the formula would show #NAME?.
+    let mut s = session();
+    let html = sheets_table(
+        "<tr><td data-sheets-value=\"{&quot;1&quot;:3,&quot;3&quot;:7}\" data-sheets-formula=\"=IMPORTRANGE(&quot;url&quot;,&quot;A1&quot;)+1\" style=\"font-weight:bold\">7</td>\
+         <td data-sheets-value=\"{&quot;1&quot;:3,&quot;3&quot;:9}\" data-sheets-formula=\"=IF(RC[-1]&gt;1,SUM(RC[-1],2),0)\">9</td></tr>",
+    );
+    s.execute("edit.paste", json!({"at": "A1", "text": "7\t9", "html": html})).unwrap();
+    assert_eq!((formula(&s, "A1"), value(&s, "A1")), (None, Value::number(7.0)));
+    assert!(style(&s, "A1").font.bold);
+    assert_eq!(formula(&s, "B1").as_deref(), Some("IF(A1>1,SUM(A1,2),0)"), "functions GridCraft has, special forms included, stay formulas");
+}

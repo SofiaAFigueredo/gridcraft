@@ -237,9 +237,22 @@ fn renders(code: &str, n: f64) -> bool {
     gridcraft_numfmt::text_function(&Value::number(n), code, gridcraft_core::date::DateSystem::D1900).is_ok()
 }
 
+/// Whether every function `expr` calls is one GridCraft has (or a LAMBDA the workbook defines).
+/// Formula entry accepts any name, but an unknown one (Sheets' `QUERY`, `IMPORTRANGE`,
+/// `ARRAYFORMULA`) would evaluate to `#NAME?` and replace the value Sheets showed.
+fn calls_known_functions(expr: &gridcraft_formula::Expr, wb: &gridcraft_model::Workbook, sheet: usize) -> bool {
+    let mut known = true;
+    expr.walk(&mut |e| {
+        if let gridcraft_formula::Expr::Call(name, _) = e {
+            known &= gridcraft_calc::is_known_function(name) || wb.name(name, sheet).is_some();
+        }
+    });
+    known
+}
+
 /// A pasted Google Sheets cell with what Sheets recorded for it: the formula (read from its R1C1
-/// notation, relative to where the cell lands) and the formatting. A formula that can't be read
-/// leaves the pasted value in place. Cells of other sources carry none of this and come back as
+/// notation, relative to where the cell lands) and the formatting. A formula that can't be read, or
+/// that calls a function GridCraft doesn't have, leaves the pasted value in place. Cells of other sources carry none of this and come back as
 /// they were.
 fn sheets_cell(
     mut cell: Option<Cell>,
@@ -251,7 +264,7 @@ fn sheets_cell(
     if let Some(f) = hc.formula.as_deref()
         && let Some(a1) = crate::clip_html::r1c1_to_a1(f, at)
         && let Ok(Some(with_formula)) = input_to_cell(&a1, sheet, at, wb)
-        && with_formula.formula.is_some()
+        && with_formula.formula.as_ref().and_then(|f| f.expr.as_ref()).is_some_and(|e| calls_known_functions(e, wb, sheet))
     {
         // The formula keeps the number format the pasted value was given (a date, a currency).
         let style = cell.as_ref().map_or(with_formula.style, |c| c.style);
