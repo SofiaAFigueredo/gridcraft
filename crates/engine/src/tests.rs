@@ -4494,6 +4494,43 @@ fn link_open_opens_existing_local_files_and_folders_but_not_programs() {
 }
 
 #[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn folder_share_urls_reach_the_host_whole_after_an_xlsx_round_trip() {
+    // OneDrive folder links carry `!`, `:`, `&`, `=`, `%` and a fragment; every part must survive
+    // import, save and `link.open`, or the browser lands on the drive root (#2085).
+    let urls = [
+        "https://1drv.ms/f/s!AbCdEf_123-xyz?e=Q1w2E3",
+        "https://onedrive.live.com/:f:/g/personal/0123456789ABCDEF/EaBcDeFgHiJk?resid=0123456789ABCDEF%21123&ithint=folder&e=a%2Bb&redeem=aHR0cHM6Ly9leGFtcGxl",
+        "https://contoso-my.sharepoint.com/:f:/g/personal/ann_contoso_com/Ep0Q?e=x#frag=1&b=2",
+    ];
+    let mut s = s();
+    for (i, url) in urls.iter().enumerate() {
+        s.execute("insert.link", json!({"cell": format!("A{}", i + 1), "target": url})).unwrap();
+    }
+    let bytes = gridcraft_xlsx::write_xlsx(&s.doc().unwrap().wb).unwrap();
+    #[allow(clippy::disallowed_methods)] // native-only test: a unique temp dir name
+    let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let dir = std::env::temp_dir().join(format!("gridcraft-shareurls-{}-{nonce}", std::process::id()));
+    std::fs::create_dir(&dir).unwrap();
+    let path = dir.join("Links.xlsx");
+    std::fs::write(&path, bytes).unwrap();
+    let mut s = Session::new();
+    s.execute("file.open", json!({"path": path})).unwrap();
+    s.take_ui_requests();
+    for (i, url) in urls.iter().enumerate() {
+        let cell = format!("A{}", i + 1);
+        assert_eq!(
+            s.doc().unwrap().wb.sheet(0).unwrap().hyperlinks.get(&CellRef::parse(&cell).unwrap()).map(|h| h.target.as_str()),
+            Some(*url),
+            "{cell}"
+        );
+        s.execute("link.open", json!({"cell": cell})).unwrap();
+        assert_eq!(s.take_ui_requests(), vec![crate::UiRequest::OpenUrl((*url).into())], "{cell}");
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn subtotal_109_recalculates_when_row_height_or_autofit_reveals_rows() {
     let mut s = s();
     s.execute("range.setValues", json!({"range": "A1", "values": [[1], [2], [4], [8]]})).unwrap();
