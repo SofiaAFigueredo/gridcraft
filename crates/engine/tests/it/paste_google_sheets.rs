@@ -168,3 +168,21 @@ fn a_formula_with_a_sheets_only_function_keeps_the_value() {
     assert!(style(&s, "A1").font.bold);
     assert_eq!(formula(&s, "B1").as_deref(), Some("IF(A1>1,SUM(A1,2),0)"), "functions GridCraft has, special forms included, stay formulas");
 }
+
+#[test]
+fn a_boolean_cell_pastes_as_a_boolean() {
+    // Sheets records a checkbox or TRUE/FALSE as type 4; the text is "TRUE"/"FALSE".
+    let mut s = session();
+    let html = sheets_table(
+        "<tr><td data-sheets-value=\"{&quot;1&quot;:4,&quot;4&quot;:1}\" style=\"text-align:center;\">TRUE</td>\
+         <td data-sheets-value=\"{&quot;1&quot;:4,&quot;4&quot;:0}\">FALSE</td>\
+         <td data-sheets-value=\"{&quot;1&quot;:4,&quot;4&quot;:1}\" data-sheets-formula=\"=RC[-2]=RC[-2]\">TRUE</td></tr>",
+    );
+    s.execute("edit.paste", json!({"at": "A1", "text": "TRUE\tFALSE\tTRUE", "html": html})).unwrap();
+    assert_eq!(value(&s, "A1"), Value::Bool(true));
+    assert_eq!(value(&s, "B1"), Value::Bool(false));
+    assert_eq!(shown(&s, "A1"), "TRUE");
+    assert_eq!(style(&s, "A1").align.h, gridcraft_engine::model::HAlign::Center);
+    assert_eq!(formula(&s, "C1").as_deref(), Some("A1=A1"));
+    assert_eq!(value(&s, "C1"), Value::Bool(true));
+}
