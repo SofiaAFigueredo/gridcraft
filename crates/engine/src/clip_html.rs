@@ -73,7 +73,9 @@ pub(crate) fn table_cells(html: &str, max_rows: usize, max_cols: usize) -> Vec<V
     }
     let mut cell: Option<OpenCell> = None;
     let mut in_table = false;
-    let mut sheets = false;
+    // The page came from Sheets (`google-sheets-html-origin`); the current table is marked as one.
+    let mut document_is_sheets = false;
+    let mut table_is_sheets = false;
     let mut rest = html;
     while !rest.is_empty() && !grid.full {
         let Some(lt) = rest.find('<') else {
@@ -104,13 +106,13 @@ pub(crate) fn table_cells(html: &str, max_rows: usize, max_cols: usize) -> Vec<V
                 let end = format!("</{name}");
                 rest = find_ci(rest, &end).and_then(|i| rest.get(i..)).unwrap_or_default();
             }
-            ("google-sheets-html-origin", false) => sheets = true,
+            ("google-sheets-html-origin", false) => document_is_sheets = true,
             ("table", false) => {
                 if in_table {
                     break; // a nested table: the outer one is the clipboard grid, stop here
                 }
                 in_table = true;
-                sheets |= attr(attrs, "data-sheets-root").is_some();
+                table_is_sheets = attr(attrs, "data-sheets-root").is_some();
             }
             ("table", true) => {
                 grid.finish(&mut cell);
@@ -118,6 +120,7 @@ pub(crate) fn table_cells(html: &str, max_rows: usize, max_cols: usize) -> Vec<V
                     break;
                 }
                 in_table = false;
+                table_is_sheets = false;
             }
             ("tr", false) if in_table => {
                 grid.finish(&mut cell);
@@ -129,7 +132,7 @@ pub(crate) fn table_cells(html: &str, max_rows: usize, max_cols: usize) -> Vec<V
                 let colspan = span(attrs, "colspan", MAX_SPAN);
                 let rowspan = span(attrs, "rowspan", MAX_ROW_SPAN);
                 let mut html_cell = HtmlCell { num, ..HtmlCell::default() };
-                if sheets || attr(attrs, "data-sheets-value").is_some() || attr(attrs, "data-sheets-formula").is_some() {
+                if document_is_sheets || table_is_sheets {
                     read_sheets_cell(&mut html_cell, attrs);
                 }
                 cell = Some(OpenCell { cell: html_cell, colspan, rowspan });
@@ -313,9 +316,9 @@ fn r1c1_token(rest: &str, at: CellRef) -> Option<(&str, String)> {
 /// `Some(Some((tail, a1)))` when it does, `None` when it does but falls off the sheet.
 fn r1c1_ref(rest: &str, at: CellRef) -> Option<Option<(&str, String)>> {
     let Some(after_r) = rest.strip_prefix('R') else { return Some(None) };
-    let Some((row, after_row)) = r1c1_axis(after_r) else { return Some(None) };
+    let (row, after_row) = r1c1_axis(after_r)?;
     let Some(after_c) = after_row.strip_prefix('C') else { return Some(None) };
-    let Some((col, tail)) = r1c1_axis(after_c) else { return Some(None) };
+    let (col, tail) = r1c1_axis(after_c)?;
     if tail.chars().next().is_some_and(|c| is_name_char(c) || c == '(') {
         return Some(None); // `RC1abc`, `RCOUNT(`: a name that only starts like a reference
     }
@@ -741,6 +744,24 @@ mod tests {
     }
 
     #[test]
+    fn sheets_marks_do_not_leak_between_tables_or_into_unmarked_cells() {
+        let cell = r##"<td style="font-weight:bold" data-sheets-value="{&quot;1&quot;:3,&quot;3&quot;:5}" data-sheets-formula="=RC[1]">5</td>"##;
+        // A cell alone, without the page or table marker, is an ordinary cell.
+        let unmarked = format!("<table><tr>{cell}</tr></table>");
+        assert_eq!(table_cells(&unmarked, 1, 1)[0][0], HtmlCell { text: "5".into(), ..Default::default() });
+        // A marked table that ends without a row doesn't mark the table after it.
+        let after_empty = format!("<table data-sheets-root=\"1\"></table><table><tr>{cell}</tr></table>");
+        assert_eq!(table_cells(&after_empty, 1, 1)[0][0], HtmlCell { text: "5".into(), ..Default::default() });
+        // The page marker marks its tables; the table marker marks its own.
+        let page = format!("<google-sheets-html-origin><table><tr>{cell}</tr></table>");
+        let table = format!("<table data-sheets-root=\"1\"><tr>{cell}</tr></table>");
+        for html in [page, table] {
+            let c = &table_cells(&html, 1, 1)[0][0];
+            assert!(c.typed && c.style.bold && c.formula.as_deref() == Some("=RC[1]"), "{html}");
+        }
+    }
+
+    #[test]
     fn css_colours() {
         assert_eq!(css_color("#fff2cc"), Some(0xFFF2CC));
         assert_eq!(css_color("#f0c"), Some(0xFF00CC));
@@ -769,6 +790,9 @@ mod tests {
         // Whole rows and columns, and cells off the sheet, can't be written.
         for f in ["=SUM(R2:R3)", "=SUM(C[-1])", "=R[-3]C[0]", "=RC[-3]", "=R1048577C1", "=R1C16385", "=R0C1", "=R[99999999999999999999]C1"] {
             assert_eq!(conv(f), None, "{f}");
+        }
+        for f in ["=R1C99999999999", "=R99999999999C1", "=R[1C1", "=RC[x]"] {
+            assert_eq!(conv(f), None, "{f}: a number that doesn't fit is a failed conversion, not a name");
         }
         assert_eq!(r1c1_to_a1("=R[1]C[1]", CellRef::parse("XFD1048576").unwrap()), None);
         assert_eq!(r1c1_to_a1("=R[-1]C[-1]", CellRef::parse("XFD1048576").unwrap()).as_deref(), Some("=XFC1048575"));
