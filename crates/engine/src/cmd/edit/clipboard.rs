@@ -181,7 +181,10 @@ fn paste_text(s: &mut Session, p: &Json, text: &str) -> Result<Json> {
                 if let Some(cl) = cell.as_mut() {
                     numeric_from_html(cl, v, hc, &mut cx.wb);
                 }
-                if let Some(hc) = hc {
+                // Only HTML that shows the same text as the field belongs to this copy.
+                if let Some(hc) = hc
+                    && crate::clip_html::normalized(&hc.text) == crate::clip_html::normalized(v)
+                {
                     cell = sheets_cell(cell, hc, sheet, c, &mut cx.wb);
                 }
                 let sh = cx.sheet_mut(sheet)?;

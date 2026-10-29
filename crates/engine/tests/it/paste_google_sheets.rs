@@ -186,3 +186,15 @@ fn a_boolean_cell_pastes_as_a_boolean() {
     assert_eq!(formula(&s, "C1").as_deref(), Some("A1=A1"));
     assert_eq!(value(&s, "C1"), Value::Bool(true));
 }
+
+#[test]
+fn html_that_shows_other_text_than_the_pasted_field_changes_nothing() {
+    // HTML left over from another copy: the cell shows 2 and holds =1+1, the pasted text says 99.
+    let mut s = session();
+    let html = sheets_table(
+        "<tr><td data-sheets-value=\"{&quot;1&quot;:3,&quot;3&quot;:2}\" data-sheets-formula=\"=1+1\" style=\"background-color:#ff0000;font-weight:bold\">2</td></tr>",
+    );
+    s.execute("edit.paste", json!({"at": "A1", "text": "99", "html": html})).unwrap();
+    assert_eq!((formula(&s, "A1"), value(&s, "A1")), (None, Value::number(99.0)));
+    assert_eq!(style(&s, "A1"), gridcraft_engine::model::Style::default());
+}
