@@ -283,7 +283,17 @@ pub fn resolve_local(base: Option<&Path>, target: &str) -> Result<PathBuf, Strin
             return Err("Links to programs and scripts aren't opened.".into());
         }
     }
-    Ok(path)
+    // The system gets the path that was checked, not the one a link may be swapped under.
+    Ok(without_verbatim_prefix(real))
+}
+
+/// Windows resolves `C:\x` to `\\?\C:\x`; the shell opens the plain drive form.
+fn without_verbatim_prefix(path: PathBuf) -> PathBuf {
+    let text = path.to_string_lossy();
+    match text.strip_prefix("\\\\?\\") {
+        Some(rest) if rest.as_bytes().get(1) == Some(&b':') => PathBuf::from(rest),
+        _ => path,
+    }
 }
 
 /// Whether `path`, or a folder on the way to it, is a symbolic link (or junction) to a network
@@ -427,6 +437,8 @@ mod tests {
         let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
         let dir = std::env::temp_dir().join(format!("gridcraft-links-{}-{nonce}", std::process::id()));
         std::fs::create_dir_all(dir.join("sub")).unwrap();
+        // The opener gets the resolved path, so compare against the resolved folder.
+        let dir = without_verbatim_prefix(std::fs::canonicalize(&dir).unwrap());
         std::fs::write(dir.join("doc.txt"), "x").unwrap();
         std::fs::write(dir.join("prog"), "#!/bin/sh\n").unwrap();
         // A relative link is taken from the workbook's folder; absolute ones and folders open as they are.
@@ -454,6 +466,9 @@ mod tests {
             for name in ["share.txt", "via.txt", "shared-dir", "shared-dir/doc.txt"] {
                 assert!(resolve_local(Some(&dir), name).unwrap_err().contains("network"), "{name}");
             }
+            // A link to a document resolves to the document itself, so a link swapped afterwards can't redirect the open.
+            std::os::unix::fs::symlink(dir.join("doc.txt"), dir.join("alias.txt")).unwrap();
+            assert_eq!(resolve_local(Some(&dir), "alias.txt").unwrap(), dir.join("doc.txt"));
             std::fs::write(dir.join("hidden.sh"), "x").unwrap();
             std::os::unix::fs::symlink(dir.join("hidden.sh"), dir.join("notes.txt")).unwrap();
             assert!(resolve_local(Some(&dir), "notes.txt").is_err());
