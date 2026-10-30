@@ -536,9 +536,13 @@ fn decode(raw: &str) -> String {
     while let Some(amp) = rest.find('&') {
         out.push_str(rest.get(..amp).unwrap_or_default());
         rest = rest.get(amp..).unwrap_or_default();
-        // `.min(len)` (not an `unwrap_or(rest)`) — a `get(..12)` that fails on a multibyte
-        // boundary used to fall back to the complete suffix, re-scanning per '&'.
-        let semi = rest.get(..ENTITY_WINDOW.min(rest.len())).and_then(|w| w.find(';'));
+        // The window is cut back to a char boundary (never `unwrap_or(rest)`: that re-scans the
+        // whole suffix per '&'), so an emoji straddling byte 12 doesn't hide an entity before it.
+        let mut end = ENTITY_WINDOW.min(rest.len());
+        while !rest.is_char_boundary(end) {
+            end -= 1;
+        }
+        let semi = rest.get(..end).and_then(|w| w.find(';'));
         let entity = semi.and_then(|e| rest.get(1..e));
         let ch = entity.and_then(|e| match e {
             "amp" => Some('&'),
@@ -656,6 +660,15 @@ mod tests {
         assert_eq!(decode("&#x266A;"), "\u{266A}");
         assert_eq!(decode("a&amp;b&nbsp;c"), "a&b\u{a0}c");
         assert_eq!(decode("amp&"), "amp&");
+    }
+
+    #[test]
+    fn entity_before_a_multibyte_char_straddling_the_window_still_decodes() {
+        // Byte 12 falls inside the second emoji; the entity ends well before it.
+        assert_eq!(decode("&amp;\u{1F60A}\u{1F60A}"), "&\u{1F60A}\u{1F60A}");
+        assert_eq!(decode("&lt;\u{1F60A}\u{1F60A}\u{1F60A}"), "<\u{1F60A}\u{1F60A}\u{1F60A}");
+        // An entity that itself straddles the window is still left alone.
+        assert_eq!(decode("&\u{1F60A}\u{1F60A}\u{1F60A};"), "&\u{1F60A}\u{1F60A}\u{1F60A};");
     }
 
     #[test]
